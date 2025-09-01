@@ -40,7 +40,7 @@ case $OS in
         SSH_PACKAGE="openssh-server"
         SSHD_CONFIG="/etc/ssh/sshd_config"
         ;;
-    "centos"|"rhel")
+    "centos"|"rhel"|"rocky")
         SSH_SERVICE="sshd"
         SSH_PACKAGE="openssh-server"
         SSHD_CONFIG="/etc/ssh/sshd_config"
@@ -63,7 +63,7 @@ if ! command -v sshd &> /dev/null; then
         "debian"|"ubuntu")
             apt-get update && apt-get install -y $SSH_PACKAGE
             ;;
-        "centos"|"rhel")
+        "centos"|"rhel"|"rocky")
             yum install -y $SSH_PACKAGE
             ;;
         "alpine")
@@ -105,7 +105,7 @@ chmod 644 $SSHD_CONFIG
 # Restart SSH service
 echo "Restarting SSH service..."
 case $OS in
-    "debian"|"ubuntu"|"centos"|"rhel")
+    "debian"|"ubuntu"|"centos"|"rhel"|"rocky")
         systemctl restart $SSH_SERVICE
         systemctl enable $SSH_SERVICE
         ;;
