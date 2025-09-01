@@ -18,6 +18,7 @@ chmod +x init-ssh.sh
 sshd -T | grep -E "passwordauthentication|permitrootlogin"
 ```
 应该输出
+
 permitrootlogin without-password
 
 passwordauthentication no
