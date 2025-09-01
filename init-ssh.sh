@@ -1,64 +1,130 @@
 #!/bin/bash
-# ==========================================
-# 通用 SSH 初始化脚本
-# 支持 Debian/Ubuntu、CentOS/RHEL、Alpine
-# 自定义端口 + 上传公钥 + 禁止密码登录
-# ==========================================
 
-# --- 参数检查 ---
-NEW_PORT=$1
-if ! [[ "$NEW_PORT" =~ ^[0-9]+$ ]] || [ "$NEW_PORT" -lt 1 ] || [ "$NEW_PORT" -gt 65535 ]; then
-    echo "用法: $0 SSH_PORT"
-    echo "示例: $0 24171"
+# Usage: ./ssh_init.sh <port> <public_key>
+# Example: ./ssh_init.sh 2222 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..."
+
+# Check if script is run as root
+if [ "$EUID" -ne 0 ]; then
+    echo "This script must be run as root"
     exit 1
 fi
 
-# --- 公钥 ---
-PUB_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICebokf+GXMr/V8n4ukMV4e9ePFwHV2XOXk+AVUSe1AU"
-
-# --- 写入公钥 ---
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-echo "$PUB_KEY" > ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-
-# --- 判断系统 & SSH 服务名 ---
-if [ -f /etc/debian_version ]; then
-    SSH_SERVICE="ssh"
-elif [ -f /etc/redhat-release ]; then
-    SSH_SERVICE="sshd"
-elif [ -f /etc/alpine-release ]; then
-    SSH_SERVICE="sshd"
-else
-    echo "当前系统未测试，可能无法正常工作"
+# Check if required arguments are provided
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <port> <public_key>"
     exit 1
 fi
 
-# --- 修改 sshd_config ---
-if [ -f /etc/ssh/sshd_config ]; then
-    SSHD_CONFIG="/etc/ssh/sshd_config"
-elif [ -f /etc/ssh/sshd_config.d/sshd_config ]; then
-    SSHD_CONFIG="/etc/ssh/sshd_config.d/sshd_config"
-else
-    echo "找不到 sshd_config 文件"
+PORT=$1
+PUBKEY=$2
+
+# Validate port number
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "Invalid port number. Must be between 1 and 65535"
     exit 1
 fi
 
-# 端口
-sed -i "s/^#\?Port .*/Port $NEW_PORT/" $SSHD_CONFIG || echo "Port $NEW_PORT" >> $SSHD_CONFIG
-# root 登录
-sed -i "s/^#\?PermitRootLogin .*/PermitRootLogin prohibit-password/" $SSHD_CONFIG || echo "PermitRootLogin prohibit-password" >> $SSHD_CONFIG
-# 禁止密码登录
-sed -i "s/^#\?PasswordAuthentication .*/PasswordAuthentication no/" $SSHD_CONFIG || echo "PasswordAuthentication no" >> $SSHD_CONFIG
-# 确保公钥登录和空密码
-grep -q "^PubkeyAuthentication" $SSHD_CONFIG || echo "PubkeyAuthentication yes" >> $SSHD_CONFIG
-grep -q "^PermitEmptyPasswords" $SSHD_CONFIG || echo "PermitEmptyPasswords no" >> $SSHD_CONFIG
-
-# --- 重启 SSH 服务 ---
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart $SSH_SERVICE
+# Detect OS and set variables
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
 else
-    service $SSH_SERVICE restart
+    echo "Cannot detect OS. /etc/os-release not found"
+    exit 1
 fi
 
-echo "✅ SSH 初始化完成！请使用：ssh -p $NEW_PORT root@IP 登录"
+# Set SSH service name and package based on OS
+case $OS in
+    "debian"|"ubuntu")
+        SSH_SERVICE="ssh"
+        SSH_PACKAGE="openssh-server"
+        SSHD_CONFIG="/etc/ssh/sshd_config"
+        ;;
+    "centos"|"rhel")
+        SSH_SERVICE="sshd"
+        SSH_PACKAGE="openssh-server"
+        SSHD_CONFIG="/etc/ssh/sshd_config"
+        ;;
+    "alpine")
+        SSH_SERVICE="sshd"
+        SSH_PACKAGE="openssh"
+        SSHD_CONFIG="/etc/ssh/sshd_config"
+        ;;
+    *)
+        echo "Unsupported OS: $OS"
+        exit 1
+        ;;
+esac
+
+# Install SSH server if not installed
+if ! command -v sshd &> /dev/null; then
+    echo "Installing SSH server..."
+    case $OS in
+        "debian"|"ubuntu")
+            apt-get update && apt-get install -y $SSH_PACKAGE
+            ;;
+        "centos"|"rhel")
+            yum install -y $SSH_PACKAGE
+            ;;
+        "alpine")
+            apk add $SSH_PACKAGE
+            ;;
+    esac
+fi
+
+# Create SSH directory for root
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+
+# Add public key to authorized_keys
+echo "$PUBKEY" > /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+chown root:root /root/.ssh/authorized_keys
+
+# Backup existing SSH config
+cp $SSHD_CONFIG ${SSHD_CONFIG}.bak
+
+# Configure SSH
+cat > $SSHD_CONFIG << EOF
+Port $PORT
+Protocol 2
+PermitRootLogin yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM no
+X11Forwarding no
+PermitEmptyPasswords no
+Subsystem sftp /usr/lib/ssh/sftp-server
+EOF
+
+# Set correct permissions for config file
+chmod 644 $SSHD_CONFIG
+
+# Restart SSH service
+echo "Restarting SSH service..."
+case $OS in
+    "debian"|"ubuntu"|"centos"|"rhel")
+        systemctl restart $SSH_SERVICE
+        systemctl enable $SSH_SERVICE
+        ;;
+    "alpine")
+        rc-service $SSH_SERVICE restart
+        rc-update add $SSH_SERVICE
+        ;;
+esac
+
+# Check if SSH service is running
+if systemctl is-active --quiet $SSH_SERVICE 2>/dev/null || rc-service $SSH_SERVICE status 2>/dev/null; then
+    echo "SSH server configured successfully on port $PORT"
+else
+    echo "Failed to start SSH service. Please check logs."
+    exit 1
+fi
+
+# Print configuration details
+echo "SSH Configuration Complete!"
+echo "Port: $PORT"
+echo "Root public key authentication: Enabled"
+echo "Password authentication: Disabled"
